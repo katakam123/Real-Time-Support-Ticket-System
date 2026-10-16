@@ -1,0 +1,232 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Support Ticket Chat</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 850px;
+      margin: 30px auto;
+      padding: 0 15px;
+    }
+
+    input, button {
+      padding: 10px;
+      margin: 5px 0;
+    }
+
+    #chat {
+      height: 350px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 12px;
+      margin: 15px 0;
+      white-space: pre-wrap;
+    }
+
+    #message {
+      width: 65%;
+    }
+
+    .internal {
+      color: #a04a00;
+    }
+
+    #status {
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>Support Ticket Chat</h1>
+
+  <label for="ticketId">Ticket ID</label><br>
+  <input id="ticketId" type="number" min="1" value="1"><br>
+
+  <label for="token">Access Token</label><br>
+  <input id="token" type="password" autocomplete="off"
+         placeholder="Paste your JWT access token" style="width: 95%;"><br>
+
+  <button id="connectBtn">Connect</button>
+  <button id="disconnectBtn" disabled>Disconnect</button>
+
+  <p id="status">Disconnected</p>
+  <div id="chat" aria-live="polite"></div>
+  <p id="typing"></p>
+
+  <label>
+    <input id="internalNote" type="checkbox">
+    Internal note (Agents/Admins only)
+  </label><br>
+
+  <input id="message" type="text" maxlength="5000"
+         placeholder="Type your message..." disabled>
+  <button id="sendBtn" disabled>Send</button>
+
+  <script>
+    let ws = null;
+    let typingTimer = null;
+    let lastTypingSent = 0;
+
+    const ticketInput = document.getElementById("ticketId");
+    const tokenInput = document.getElementById("token");
+    const chat = document.getElementById("chat");
+    const messageInput = document.getElementById("message");
+    const statusText = document.getElementById("status");
+    const typingText = document.getElementById("typing");
+    const internalCheckbox = document.getElementById("internalNote");
+
+    function addMessage(text, internal = false) {
+      const line = document.createElement("div");
+      line.textContent = text;
+
+      if (internal) {
+        line.className = "internal";
+      }
+
+      chat.appendChild(line);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function connect() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        return;
+      }
+
+      const ticketId = ticketInput.value.trim();
+      const token = tokenInput.value.trim();
+
+      if (!ticketId || !token) {
+        alert("Enter a ticket ID and access token.");
+        return;
+      }
+
+      const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${scheme}//${location.host}/ws/tickets/` +
+                  `${encodeURIComponent(ticketId)}?token=` +
+                  encodeURIComponent(token);
+
+      ws = new WebSocket(url);
+      statusText.textContent = "Connecting...";
+
+      ws.onopen = () => {
+        statusText.textContent = "Connected";
+        messageInput.disabled = false;
+        document.getElementById("sendBtn").disabled = false;
+        document.getElementById("disconnectBtn").disabled = false;
+        document.getElementById("connectBtn").disabled = true;
+        messageInput.focus();
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "history") {
+          chat.replaceChildren();
+
+          data.data.forEach(item => {
+            addMessage(
+              `${item.sender_role} #${item.sender_id}: ${item.message}` +
+              (item.is_read ? " [read]" : ""),
+              item.is_internal_note
+            );
+          });
+        } else if (data.type === "message") {
+          const item = data.data;
+
+          addMessage(
+            `${item.sender_role} #${item.sender_id}: ${item.message}` +
+            (item.is_read ? " [read]" : ""),
+            item.is_internal_note
+          );
+        } else if (data.type === "typing") {
+          typingText.textContent = data.is_typing
+            ? `${data.sender_role} is typing...`
+            : "";
+        } else if (data.type === "error") {
+          addMessage(`Error: ${data.message}`);
+        }
+      };
+
+      ws.onerror = () => {
+        statusText.textContent = "Connection error";
+      };
+
+      ws.onclose = () => {
+        statusText.textContent = "Disconnected";
+        messageInput.disabled = true;
+        document.getElementById("sendBtn").disabled = true;
+        document.getElementById("disconnectBtn").disabled = true;
+        document.getElementById("connectBtn").disabled = false;
+        typingText.textContent = "";
+      };
+    }
+
+    function sendMessage() {
+      const text = messageInput.value.trim();
+
+      if (!text || !ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      ws.send(JSON.stringify({
+        type: "message",
+        message: text,
+        is_internal_note: internalCheckbox.checked
+      }));
+
+      messageInput.value = "";
+      ws.send(JSON.stringify({
+        type: "typing",
+        is_typing: false
+      }));
+    }
+
+    document.getElementById("connectBtn").onclick = connect;
+
+    document.getElementById("disconnectBtn").onclick = () => {
+      if (ws) {
+        ws.close();
+      }
+    };
+
+    document.getElementById("sendBtn").onclick = sendMessage;
+
+    messageInput.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        sendMessage();
+      }
+    });
+
+    messageInput.addEventListener("input", () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      const now = Date.now();
+
+      if (now - lastTypingSent > 1000) {
+        ws.send(JSON.stringify({
+          type: "typing",
+          is_typing: true
+        }));
+        lastTypingSent = now;
+      }
+
+      clearTimeout(typingTimer);
+
+      typingTimer = setTimeout(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "typing",
+            is_typing: false
+          }));
+        }
+      }, 1500);
+    });
+  </script>
+</body>
+</html>
